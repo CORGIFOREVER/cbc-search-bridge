@@ -1,0 +1,17 @@
+# 依赖
+node_modules/
+
+# 日志（可能包含搜索记录）
+*.log
+
+# 本地测试产物
+*.json.bak
+
+# 环境/凭据
+.env
+.credentials.yaml
+*.local
+
+# 系统文件
+Thumbs.db
+.DS_Store

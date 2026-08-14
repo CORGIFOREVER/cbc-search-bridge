@@ -1,6 +1,7 @@
 # 一键启动 deepseek-harness（含搜索桥接服务）
 #
 # 逻辑：
+#   0. 确保 CodeBuddy CLI daemon 在运行（调用 ensure-codebuddy.ps1）
 #   1. 确保 cbc-search-bridge（端口 3200）在运行，未运行则启动
 #   2. 确保 dsh web harness（端口 3080）在运行，未运行则启动
 #
@@ -18,6 +19,18 @@ $dshBin = $env:BRIDGE_DSH_BIN
 if (-not $dshBin) { $dshBin = 'C:\Users\23006\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\lib\bin.js' }
 $harnessWorkDir = $env:BRIDGE_HARNESS_DIR
 if (-not $harnessWorkDir) { $harnessWorkDir = 'C:\deepseekharness\deepseek-harness' }
+
+# ── 0. 确保 CodeBuddy CLI daemon 运行（搜索通道依赖它）──
+$ensureScript = Join-Path $bridgeDir 'ensure-codebuddy.ps1'
+if (Test-Path $ensureScript) {
+    Write-Host "--- Step 0: ensure CodeBuddy CLI is running ---"
+    & $ensureScript
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "[harness] CodeBuddy CLI not ready. Search will degrade to Exa fallback (if EXA_API_KEY set)."
+    }
+} else {
+    Write-Warning "[harness] ensure-codebuddy.ps1 not found next to start-harness.ps1; skipping CodeBuddy readiness check."
+}
 
 # ── 1. 确保桥接服务运行 ──
 $bridge = Get-NetTCPConnection -LocalPort 3200 -State Listen -ErrorAction SilentlyContinue

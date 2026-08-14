@@ -4,6 +4,8 @@ Local Exa-compatible search bridge that routes DeepSeek harness search queries t
 
 让 DeepSeek harness（`dsh web`）的联网搜索走 CodeBuddy CLI 的 web search 能力，并按 API key 类型自动选择搜索通道的本地桥接服务。
 
+> **Language / 语言**: [English](README.en.md) | [简体中文](README.md)
+
 ## 为什么需要它
 
 `dsh web` harness 内置的联网搜索要求使用 DeepSeek **官方** API key（`web_search_20250305` 原生工具）。如果使用 apikey.fun 等 OpenAI 兼容代理，模型没有原生搜索工具，只会"假装搜索"编造数据。

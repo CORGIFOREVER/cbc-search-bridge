@@ -225,6 +225,88 @@ Invoke-RestMethod http://127.0.0.1:3200/health
 
 切换 API key 时无需修改任何配置，桥接服务会自动识别 key 类型并切换搜索通道。
 
+## 在 WSL 上运行
+
+如果不想碰 PowerShell（避免命令书写/编码问题），可以把整套 harness + 桥接放到 WSL2 (Ubuntu) 里跑，全部用 bash。
+
+### 0. 前置：WSL2 + Ubuntu
+
+在 Windows PowerShell 里执行（只需一次）：
+
+```powershell
+wsl --install -d Ubuntu
+wsl -d Ubuntu
+```
+
+### 1. 一键准备环境
+
+在 WSL Ubuntu 里执行：
+
+```bash
+git clone https://github.com/CORGIFOREVER/cbc-search-bridge.git ~/cbc-search-bridge
+cd ~/cbc-search-bridge
+bash wsl-setup.sh
+```
+
+脚本会：
+
+- 通过 nvm 安装 **Linux 原生 Node LTS**（避免误用 Windows 的 node/npm）
+- 检查 curl / git
+- 若仓库不在 `~/cbc-search-bridge` 则自动 clone
+
+### 2. 一键启动
+
+```bash
+cd ~/cbc-search-bridge
+bash wsl-start.sh
+```
+
+`wsl-start.sh` 会：
+
+1. 后台启动桥接 `node server.mjs`（监听 `127.0.0.1:3200`）
+2. 健康检查通过后前台启动 `npx @deepseek-ai/dsh web`
+3. 退出 harness 时自动停掉本次拉起的桥接
+
+### 3. 配置 web_search 走本地桥接
+
+首次启动 `dsh web` 后，编辑 `~/.dsh/profiles/web/cordis.patch.yml`（WSL 里的路径）：
+
+```yaml
+- insert:
+    - id: web-search-exa
+      name: '@deepseek-ai/dsh-web-search-exa'
+      config:
+        baseURL: 'http://127.0.0.1:3200'
+        apiKey: 'local-bridge'
+
+- id: web
+  config:
+    searchProvider: exa
+
+- id: tool-web
+  disabled: false
+```
+
+> 如果只想用 Bing/Exa，不装 CodeBuddy 也完全没问题（见上文“没有安装 CodeBuddy CLI 怎么办”）。
+
+### 4. 环境变量
+
+在 `~/.bashrc` 里追加：
+
+```bash
+export EXA_API_KEY='你的key'   # 可选，Bing 兜底不需要
+```
+
+### 5. 路径/端口说明
+
+- WSL 里 bridge 和 harness 都监听 `127.0.0.1`，互相直连，不需要 Windows 的 localhost 转发；
+- 想从 Windows 浏览器访问 harness UI：WSL2 默认 localhost 转发，直接开 `http://127.0.0.1:3080` 即可；
+- 想用 Windows 侧文件：`/mnt/c/deepseekharness/cbc-search-bridge` 可以访问，但**推荐放 Linux 文件系统**（`~/cbc-search-bridge`），IO 更快、避免 Windows 路径/权限问题。
+
+### 6. 可选：工具层铁打兜底插件
+
+`dsh-web-search-resilient/` 也支持在 WSL 里装：把它 link 进 WSL 的 profile 依赖即可（具体见该子目录 README）。不装也不影响桥接层兜底（CodeBuddy → Bing → Exa）。
+
 ## 搜索请求格式
 
 桥接服务模拟 Exa 的 `POST /search` 端点：

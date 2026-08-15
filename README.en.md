@@ -224,6 +224,88 @@ Edit `~/.dsh/profiles/web/cordis.patch.yml`:
 
 When you switch API keys you don't need to change any configuration; the bridge automatically detects the key type and switches the search channel.
 
+## Running on WSL
+
+If you want to avoid PowerShell quoting/encoding pain, you can run the whole harness + bridge inside WSL2 (Ubuntu) using bash only.
+
+### 0. Prerequisite: WSL2 + Ubuntu
+
+Run once in Windows PowerShell:
+
+```powershell
+wsl --install -d Ubuntu
+wsl -d Ubuntu
+```
+
+### 1. One-shot environment setup
+
+Inside WSL Ubuntu:
+
+```bash
+git clone https://github.com/CORGIFOREVER/cbc-search-bridge.git ~/cbc-search-bridge
+cd ~/cbc-search-bridge
+bash wsl-setup.sh
+```
+
+The script:
+
+- Installs a **Linux-native Node LTS** via nvm (avoids accidentally using Windows node/npm)
+- Checks curl / git
+- Clones the repo into `~/cbc-search-bridge` if it is not there yet
+
+### 2. One-shot start
+
+```bash
+cd ~/cbc-search-bridge
+bash wsl-start.sh
+```
+
+`wsl-start.sh` will:
+
+1. Start the bridge in the background (`node server.mjs`, listening on `127.0.0.1:3200`)
+2. Wait for the health check, then start `npx @deepseek-ai/dsh web` in the foreground
+3. Stop the bridge it started when the harness exits
+
+### 3. Point web_search at the local bridge
+
+After the first `dsh web` start, edit `~/.dsh/profiles/web/cordis.patch.yml` (the WSL path):
+
+```yaml
+- insert:
+    - id: web-search-exa
+      name: '@deepseek-ai/dsh-web-search-exa'
+      config:
+        baseURL: 'http://127.0.0.1:3200'
+        apiKey: 'local-bridge'
+
+- id: web
+  config:
+    searchProvider: exa
+
+- id: tool-web
+  disabled: false
+```
+
+> Not installing CodeBuddy CLI is fine — Bing/Exa fallback will be used automatically (see the "What if CodeBuddy CLI is not installed at all?" section above).
+
+### 4. Environment variables
+
+Append to `~/.bashrc`:
+
+```bash
+export EXA_API_KEY='your-key'   # optional; Bing fallback does not need it
+```
+
+### 5. Paths / ports
+
+- Inside WSL both the bridge and the harness listen on `127.0.0.1` and talk to each other directly; no Windows localhost forwarding needed.
+- To open the harness UI from a Windows browser, WSL2 localhost forwarding usually lets you use `http://127.0.0.1:3080` directly.
+- Windows files are reachable at `/mnt/c/deepseekharness/cbc-search-bridge`, but it is recommended to keep the repo on the Linux filesystem (`~/cbc-search-bridge`) for speed and to avoid Windows path/permission issues.
+
+### 6. Optional: tool-layer ironclad fallback plugin
+
+`dsh-web-search-resilient/` can also be installed inside WSL by linking it into the WSL profile dependencies (see that subdirectory's README). Without it, the bridge-layer fallback (CodeBuddy → Bing → Exa) still works.
+
 ## Search request format
 
 The bridge mimics the Exa `POST /search` endpoint:

@@ -211,6 +211,18 @@ node tests/test-router.mjs              # Smart routing test
 node tests/test-probe.mjs               # Key-type probing test
 ```
 
+## Changelog
+
+### 2026-08-15: Fix `$ErrorActionPreference` in `ensure-codebuddy.ps1` that aborted the whole startup chain
+
+**Problem**: `ensure-codebuddy.ps1` previously set `$ErrorActionPreference = 'Stop'`. During the probe step (`codebuddy -p "hi"`), the external `node.exe` command writes normal probe output to stderr; when the network is unavailable (e.g. a TLS 502), a non-zero native stderr is treated by PowerShell as a **terminating error** under `Stop`, which aborted the entire `start-harness.ps1` startup chain at Step 0 — neither the bridge service nor the harness would start.
+
+**Changes**:
+- `ensure-codebuddy.ps1`: `$ErrorActionPreference` changed from `Stop` to `Continue`. The script already has explicit exit-code checks (`$LASTEXITCODE`) and retry logic, so `Continue` is completely safe and no longer escalates probe failures into terminating errors.
+- `start-harness.ps1`: the step that invokes `ensure-codebuddy.ps1` is now wrapped in `try/catch`, so even if the child script throws any exception, the bridge and harness still start normally.
+
+**Why**: Probe failures (CLI not logged in, network unreachable) are an **expected** degradation scenario — the bridge still has the Exa fallback channel. The correct behavior is to warn and continue, not to abort the whole harness. After this fix the startup chain becomes "Step 0 failed → warning → continue", which is more fault-tolerant.
+
 ## License
 
 MIT

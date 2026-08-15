@@ -13,7 +13,11 @@
 #   5. Light probe (codebuddy -p "hi") to warn if CLI is not usable
 #
 # Usage:  .\ensure-codebuddy.ps1    (called automatically by start-harness.ps1)
-$ErrorActionPreference = 'Stop'
+# Note: 'Continue' is deliberate. External commands (node.exe) write probe
+# output to stderr; under 'Stop' a non-zero native stderr becomes a terminating
+# error that aborts the whole start-harness chain. This script checks exit
+# codes explicitly, so 'Continue' is safe and robust.
+$ErrorActionPreference = 'Continue'
 
 # Locate codebuddy. On Windows the bin/codebuddy file has no extension and
 # must be invoked via node.exe, so resolve BOTH node and the real bin path.

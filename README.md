@@ -212,6 +212,18 @@ node tests/test-router.mjs              # 智能路由测试
 node tests/test-probe.mjs               # key 类型探测测试
 ```
 
+## 变更记录
+
+### 2026-08-15: 修复 `ensure-codebuddy.ps1` 的 `$ErrorActionPreference` 导致启动链中断
+
+**问题**：`ensure-codebuddy.ps1` 之前设置了 `$ErrorActionPreference = 'Stop'`。在探活阶段（`codebuddy -p "hi"`），外部命令 `node.exe` 会把正常的探活输出写入 stderr；当网络不可用（如 TLS 502）时，非零退出的原生 stderr 在 `Stop` 模式下会被 PowerShell 当作**终止错误**抛出，导致整个 `start-harness.ps1` 启动链在 Step 0 就中断，桥接服务和 harness 都不会启动。
+
+**修改**：
+- `ensure-codebuddy.ps1`：`$ErrorActionPreference` 从 `Stop` 改为 `Continue`。脚本内部已有显式的退出码检查（`$LASTEXITCODE`）和重试逻辑，`Continue` 模式完全安全，且不会把探活失败升级为终止错误。
+- `start-harness.ps1`：调用 `ensure-codebuddy.ps1` 的步骤增加 `try/catch` 保护，即使子脚本抛出任何异常，桥接服务和 harness 仍会照常启动。
+
+**原因**：探活失败（CLI 未登录、网络不可达）是**预期内**的降级场景——桥接服务还有 Exa 兜底通道。此时应该只输出警告并继续启动，而不是中止整个 harness。修复后启动链变为"Step 0 失败 → 警告 → 继续"，更符合容错设计。
+
 ## 许可
 
 MIT

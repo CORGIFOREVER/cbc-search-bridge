@@ -24,9 +24,13 @@ if (-not $harnessWorkDir) { $harnessWorkDir = 'C:\deepseekharness\deepseek-harne
 $ensureScript = Join-Path $bridgeDir 'ensure-codebuddy.ps1'
 if (Test-Path $ensureScript) {
     Write-Host "--- Step 0: ensure CodeBuddy CLI is running ---"
-    & $ensureScript
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "[harness] CodeBuddy CLI not ready. Search will degrade to Exa fallback (if EXA_API_KEY set)."
+    try {
+        & $ensureScript
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "[harness] CodeBuddy CLI not ready. Search will degrade to Exa fallback (if EXA_API_KEY set)."
+        }
+    } catch {
+        Write-Warning "[harness] ensure-codebuddy.ps1 raised an error: $($_.Exception.Message)"
     }
 } else {
     Write-Warning "[harness] ensure-codebuddy.ps1 not found next to start-harness.ps1; skipping CodeBuddy readiness check."

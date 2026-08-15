@@ -32,17 +32,31 @@ const HOST = '127.0.0.1';
 
 // ── 找到 codebuddy CLI 可执行文件 ──
 // 优先直接调用 node + bin/codebuddy 入口，绕开 .cmd/.ps1 包装器的引号与编码问题。
+// ── 找到 codebuddy CLI 可执行文件 ──
+// 优先直接调用 node + bin/codebuddy 入口，绕开 .cmd/.ps1 包装器的引号与编码问题。
 function resolveCli() {
   if (process.platform === 'win32') {
-    const node = process.env.NODE || 'C:\\Program Files\\nodejs\\node.exe';
+    const node = process.env.NODE || 'C:/Program Files/nodejs/node.exe';
     const bin = path.join(homedir(), 'AppData', 'Roaming', 'npm', 'node_modules', '@tencent-ai', 'codebuddy-code', 'bin', 'codebuddy');
     if (existsSync(bin)) return { node, bin };
   } else {
+    // Linux/macOS：优先用 which + readlink -f 解析 PATH 里 codebuddy 的真实 JS 入口，
+    // 避免把 codebuddy 当成相对模块路径 spawn（node codebuddy → /root/codebuddy）。
+    try {
+      const which = execFileSync('which', ['codebuddy'], { encoding: 'utf8' }).trim();
+      if (which) {
+        let real = which;
+        try {
+          real = execFileSync('readlink', ['-f', which], { encoding: 'utf8' }).trim() || which;
+        } catch { /* 保留 which 结果 */ }
+        return { node: process.env.NODE || 'node', bin: real };
+      }
+    } catch { /* which 不可用或未找到，继续走固定路径 */ }
     for (const b of ['/usr/local/bin/codebuddy', '/usr/bin/codebuddy']) {
       if (existsSync(b)) return { node: 'node', bin: b };
     }
   }
-  // 回退：走 PATH
+  // 回退：走 PATH（Windows 场景下 bin 已是 JS 入口；Linux 下由上面解析）
   return { node: process.env.NODE || 'node', bin: 'codebuddy' };
 }
 

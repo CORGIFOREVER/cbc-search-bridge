@@ -1,0 +1,26 @@
+{
+  "name": "@dsh-external/dsh-web-search-resilient",
+  "version": "0.1.0",
+  "description": "Resilient WebSearchProvider for DeepSeek Harness: cbc-search-bridge (:3200) first, Shell curl Bing fallback, Exa direct last resort — keeps web_search alive even when the bridge process is down.",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "README.md"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-web": ">=0.1.0-rc <1",
+    "@deepseek-ai/dsh-launch-environment": ">=0.1.0-rc <1",
+    "@deepseek-ai/schemastery": "^3.18.0"
+  }
+}

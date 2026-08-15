@@ -41,6 +41,7 @@ cbc-search-bridge/
 ├── package-lock.json     # 依赖锁定文件
 ├── .gitignore            # 排除 node_modules/ 日志 凭据等
 ├── README.md             # 本文档
+├── dsh-web-search-resilient/  # DSH 插件：桥接挂了 → 工具级 Bing/Exa 兜底
 └── tests/                # 各通道测试脚本（见下方"测试"章节）
 ```
 
@@ -54,6 +55,7 @@ cbc-search-bridge/
 | `stop-bridge.ps1` | 停掉 3200 端口的桥接服务 |
 | `start-harness.ps1` | 完整一键启动：0) 确保 CodeBuddy CLI daemon → 1) 确保桥接服务 → 2) 确保 dsh web harness，每步都带就绪等待和失败提示 |
 | `stop-harness.ps1` | 同时停掉 harness（3080）和桥接（3200），配合 start 使用 |
+| `dsh-web-search-resilient/` | 可选 DSH 插件：让 `web_search` 在桥接进程挂掉时仍能自动 curl Bing / 直连 Exa（工具层铁打兜底） |
 
 ### 使用方式
 
@@ -184,7 +186,7 @@ codebuddy -p "hi"
 **更进一步的“工具层铁打兜底”**（可选，DSH 插件）：
 
 即使 `cbc-search-bridge` 进程本身挂了，`web_search` 工具也不会失败——配套的
-`@dsh-external/dsh-web-search-resilient` 插件会在 DSH 进程内：先探测 `:3200/health`，
+`dsh-web-search-resilient/` 插件（本仓库子目录）会在 DSH 进程内：先探测 `:3200/health`，
 桥接活着就走桥接；桥接挂了就直接用 Shell curl 抓 Bing，Bing 也失败再直连 Exa。
 这样兜底不再依赖模型按 AGENTS.md 手动 curl。
 

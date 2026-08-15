@@ -40,6 +40,7 @@ cbc-search-bridge/
 ├── .gitignore            # Excludes node_modules/, logs, credentials, etc.
 ├── README.md             # This document (Chinese)
 ├── README.en.md          # This document (English)
+├── dsh-web-search-resilient/  # Optional DSH plugin: tool-layer Bing/Exa fallback when the bridge is down
 └── tests/                # Channel test scripts (see the "Testing" section below)
 ```
 
@@ -53,6 +54,7 @@ cbc-search-bridge/
 | `stop-bridge.ps1` | Stops the bridge service on port 3200. |
 | `start-harness.ps1` | Full one-shot start: 0) ensure the CodeBuddy CLI daemon → 1) ensure the bridge service → 2) ensure the dsh web harness, each step with readiness waiting and failure hints. |
 | `stop-harness.ps1` | Stops both the harness (3080) and the bridge (3200); pairs with start. |
+| `dsh-web-search-resilient/` | Optional DSH plugin: keeps `web_search` alive with automatic curl-Bing / direct-Exa fallback even when the bridge process is down. |
 
 ### Usage
 
@@ -183,7 +185,7 @@ codebuddy -p "hi"
 **Even stronger "tool-layer" fallback** (optional, DSH plugin):
 
 Even if the `cbc-search-bridge` process itself is down, the `web_search` tool will not fail — the companion
-`@dsh-external/dsh-web-search-resilient` plugin runs inside the DSH process: it probes `:3200/health` first,
+`dsh-web-search-resilient/` plugin (a subdirectory of this repo) runs inside the DSH process: it probes `:3200/health` first,
 uses the bridge when it is healthy, and when the bridge is down it directly fetches Bing with Shell curl,
 then Exa if Bing also fails. This removes the need to rely on the model manually running curl per AGENTS.md.
 

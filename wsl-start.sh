@@ -44,4 +44,10 @@ trap cleanup EXIT
 
 # ── 3. 启动 DSH harness（前台）──
 echo "==> 启动 dsh web（首次会自动创建 ~/.dsh 配置）..."
-exec npx -y @deepseek-ai/dsh web
+if command -v dsh >/dev/null 2>&1; then
+  echo "==> 使用全局 dsh CLI"
+  exec dsh web
+else
+  echo "==> 未找到全局 dsh，使用 npx"
+  exec npx -y @deepseek-ai/dsh web
+fi

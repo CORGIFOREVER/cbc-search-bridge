@@ -4,7 +4,7 @@
 #   bash wsl-setup.sh
 set -euo pipefail
 
-echo "==> [1/4] 检查/安装 Linux 原生 Node.js (nvm)"
+echo "==> [1/5] 检查/安装 Linux 原生 Node.js (nvm)"
 
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 if ! command -v node >/dev/null 2>&1; then
@@ -21,16 +21,23 @@ else
   echo "==> 已检测到 node: $(node -v)"
 fi
 
-# 确保当前 shell 能用到 nvm 里的 node（新终端也要 source ~/.bashrc）
 # shellcheck disable=SC1091
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 echo "==> node $(node -v) / npm $(npm -v)"
 
-echo "==> [2/4] 检查 curl / git"
+echo "==> [2/5] 安装构建工具（node-pty / koffi 需要 make/g++/python）"
+if command -v make >/dev/null 2>&1 && command -v g++ >/dev/null 2>&1; then
+  echo "==> 构建工具已存在"
+else
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential python3 make g++
+fi
+
+echo "==> [3/5] 检查 curl / git"
 command -v curl >/dev/null || { echo "缺少 curl，请先 apt install curl"; exit 1; }
 command -v git  >/dev/null || { echo "缺少 git，请先 apt install git"; exit 1; }
 
-echo "==> [3/4] 准备仓库"
+echo "==> [4/5] 准备仓库"
 REPO_DIR="${CBC_BRIDGE_DIR:-$HOME/cbc-search-bridge}"
 if [ ! -f "$REPO_DIR/server.mjs" ]; then
   echo "==> clone 到 $REPO_DIR"
@@ -40,7 +47,13 @@ else
   echo "==> 仓库已存在: $REPO_DIR"
 fi
 
-echo "==> [4/4] 环境检查"
+echo "==> [5/5] 安装全局 @deepseek-ai/dsh（含原生依赖编译）"
+if command -v dsh >/dev/null 2>&1; then
+  echo "==> dsh 已存在: $(dsh --version)"
+else
+  npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs @deepseek-ai/dsh
+fi
+
 if [ -z "${EXA_API_KEY:-}" ]; then
   echo "==> 提示：未检测到 EXA_API_KEY。"
   echo "    - Bing 兜底不需要 key；"

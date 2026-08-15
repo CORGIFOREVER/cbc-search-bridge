@@ -20,7 +20,8 @@ Upon receiving a search request, the bridge picks a channel in this order:
 
 1. **DeepSeek official channel** — If `DEEPSEEK_API_KEY` is an official key (probe of `api.deepseek.com/anthropic/v1` passes), it calls DeepSeek's native web search directly (via the `web_search_20250305` tool), with zero extra dependencies.
 2. **CodeBuddy channel** — Otherwise it invokes the web_search tool through CodeBuddy CLI (non-interactive `-p` mode) and parses the JSON output.
-3. **Exa fallback** — If both of the above are unavailable, it calls the Exa API directly (requires `EXA_API_KEY`), guaranteeing search always works.
+3. **Bing fallback** — If CodeBuddy fails, it fetches `https://www.bing.com/search` with Shell curl and parses `b_algo` results into the Exa format (requires `curl` in PATH; Windows 10+ ships it).
+4. **Exa fallback** — If Bing also fails, it finally calls the Exa API directly (requires `EXA_API_KEY`), guaranteeing search always works.
 
 Probe results are cached for 10 minutes to avoid repeated probing.
 
@@ -28,7 +29,7 @@ Probe results are cached for 10 minutes to avoid repeated probing.
 
 ```
 cbc-search-bridge/
-├── server.mjs            # Core: the bridge service (Node native http, no framework deps, ~430 lines)
+├── server.mjs            # Core: the bridge service (Node native http, no framework deps, ~540 lines)
 ├── ensure-codebuddy.ps1  # Ensures the CodeBuddy CLI daemon is running (Step 0 of start-harness)
 ├── start-bridge.ps1      # Starts the bridge service alone
 ├── stop-bridge.ps1       # Stops the bridge service
@@ -46,7 +47,7 @@ cbc-search-bridge/
 
 | File | Responsibility |
 |------|----------------|
-| `server.mjs` | The bridge service. Listens on 127.0.0.1:3200 and mimics the Exa `POST /search` endpoint; implements the three search channels (DeepSeek official / CodeBuddy CLI / Exa) plus smart routing and key-type probing (10-minute cache). |
+| `server.mjs` | The bridge service. Listens on 127.0.0.1:3200 and mimics the Exa `POST /search` endpoint; implements the four search channels (DeepSeek official / CodeBuddy CLI / Bing curl / Exa) plus smart routing and key-type probing (10-minute cache). |
 | `ensure-codebuddy.ps1` | **Keeps the CodeBuddy CLI in service.** Checks `codebuddy daemon status`; starts it via `daemon start` if not running; then does a lightweight `-p "hi"` probe. Automatically invoked as Step 0 of `start-harness.ps1`. |
 | `start-bridge.ps1` | Starts only the bridge service (for standalone debugging, or when the harness is already running and you don't want to restart it). |
 | `stop-bridge.ps1` | Stops the bridge service on port 3200. |
@@ -125,8 +126,66 @@ codebuddy daemon status
 ### Prerequisites
 
 - Node.js 18+
-- CodeBuddy CLI installed (`npm install -g @tencent-ai/codebuddy-code`) and logged in, or `EXA_API_KEY` configured as a fallback
+- CodeBuddy CLI installed (`npm install -g @tencent-ai/codebuddy-code`) and logged in
+- `curl` available in PATH (Windows 10+ ships `C:WindowsSystem32curl.exe`) for the Bing fallback; or `EXA_API_KEY` configured as the last-resort fallback
 - (Optional) DeepSeek official key: environment variable `DEEPSEEK_API_KEY` or `~/.dsh/.credentials.yaml`
+
+### What if CodeBuddy CLI is not installed at all?
+
+**No problem — the bridge automatically skips CodeBuddy and falls back to Bing/Exa.**
+
+The routing order is:
+
+```
+DeepSeek official → CodeBuddy CLI → Bing (Shell curl) → Exa
+```
+
+If CodeBuddy CLI was **never installed** on the machine (or is not logged in / its backend is unreachable), the bridge does not get stuck:
+
+1. `cbcSearch()` tries to spawn `codebuddy` and immediately gets an `ENOENT`/spawn error;
+2. The error is caught and the bridge automatically enters the **Bing fallback**: it fetches `https://www.bing.com/search` with the system `curl` and parses `b_algo` blocks;
+3. Only if Bing also fails does it enter the **Exa fallback** (requires `EXA_API_KEY`).
+
+Minimum working setup:
+
+- Have `curl` (Windows 10+ ships it; Git Bash also has it) → no CodeBuddy and no Exa key needed;
+- Want extra resilience → also configure `EXA_API_KEY`;
+- Want the CodeBuddy channel → install the CLI and log in.
+
+Scenario table:
+
+| Machine state | Search available? | Actual channel |
+|---|---|---|
+| Only curl | ✅ | Bing |
+| curl + EXA_API_KEY | ✅ | Bing → Exa |
+| CodeBuddy installed and logged in | ✅ | CodeBuddy → Bing → Exa |
+| Nothing installed | ❌ | All fail |
+
+**To enable the CodeBuddy channel** (optional):
+
+```powershell
+# 1. Install CodeBuddy CLI globally
+npm install -g @tencent-ai/codebuddy-code
+
+# 2. Log in (follow the prompts)
+codebuddy
+
+# 3. Verify
+codebuddy -p "hi"
+# Should reply normally instead of 502/ENOENT
+
+# 4. The startup chain keeps the daemon alive automatically
+.start-harness.ps1
+```
+
+> Note: `ensure-codebuddy.ps1` only **warns and continues** when the CLI is missing or not logged in, because the Bing/Exa fallback still exists. A missing CodeBuddy CLI will never abort startup.
+
+**Even stronger "tool-layer" fallback** (optional, DSH plugin):
+
+Even if the `cbc-search-bridge` process itself is down, the `web_search` tool will not fail — the companion
+`@dsh-external/dsh-web-search-resilient` plugin runs inside the DSH process: it probes `:3200/health` first,
+uses the bridge when it is healthy, and when the bridge is down it directly fetches Bing with Shell curl,
+then Exa if Bing also fails. This removes the need to rely on the model manually running curl per AGENTS.md.
 
 ### Start
 
@@ -189,7 +248,7 @@ Response format:
 }
 ```
 
-Test hook: the request header `x-force-fallback: 1` forces the Exa fallback channel, useful for verifying the degradation path.
+Test hooks: `x-force-fallback: 1` forces the Exa fallback channel; `x-force-bing: 1` forces the Bing fallback channel; `x-force-codebuddy-fail: 1` forces CodeBuddy to fail (verifies automatic fallback to Bing); `x-force-bing-fail: 1` forces Bing to fail (verifies automatic fallback to Exa).
 
 ## Environment variables
 
@@ -221,7 +280,7 @@ node tests/test-probe.mjs               # Key-type probing test
 - `ensure-codebuddy.ps1`: `$ErrorActionPreference` changed from `Stop` to `Continue`. The script already has explicit exit-code checks (`$LASTEXITCODE`) and retry logic, so `Continue` is completely safe and no longer escalates probe failures into terminating errors.
 - `start-harness.ps1`: the step that invokes `ensure-codebuddy.ps1` is now wrapped in `try/catch`, so even if the child script throws any exception, the bridge and harness still start normally.
 
-**Why**: Probe failures (CLI not logged in, network unreachable) are an **expected** degradation scenario — the bridge still has the Exa fallback channel. The correct behavior is to warn and continue, not to abort the whole harness. After this fix the startup chain becomes "Step 0 failed → warning → continue", which is more fault-tolerant.
+**Why**: Probe failures (CLI not logged in, network unreachable) are an **expected** degradation scenario — the bridge still has the Bing/Exa fallback channels. The correct behavior is to warn and continue, not to abort the whole harness. After this fix the startup chain becomes "Step 0 failed → warning → continue", which is more fault-tolerant.
 
 ## License
 

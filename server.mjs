@@ -1,18 +1,21 @@
 /**
- * cbc-search-bridge — 本地 Exa 兼容搜索桥（智能路由：DeepSeek 官方 > CodeBuddy > Exa）
+ * cbc-search-bridge — 本地 Exa 兼容搜索桥（智能路由：DeepSeek 官方 > CodeBuddy > Bing > Exa）
  *
  * 模拟 Exa 的 `POST /search` 端点，收到 harness 的搜索请求后按以下顺序路由：
  *   1. 若 DEEPSEEK_API_KEY 是 DeepSeek 官方 key（探测通过）→ 调 DeepSeek 官方
  *      Anthropic 兼容搜索（web_search_20250305 原生工具），转 Exa 格式返回。
  *   2. 否则 → 通过 CodeBuddy CLI（非交互 print 模式）调用 web_search 工具。
- *   3. 若 CodeBuddy 通道不可用（CLI 未登录/超时/解析失败）→ 直接调 Exa API
- *      （需 EXA_API_KEY），保证搜索始终可用。
+ *   3. 若 CodeBuddy 通道不可用（CLI 未登录/超时/解析失败）→ 用 Shell curl 抓 Bing
+ *      搜索结果（b_algo 解析），转 Exa 格式返回。
+ *   4. 若 Bing 也失败（网络/反爬/无结果）→ 最后直接调 Exa API（需 EXA_API_KEY），
+ *      保证搜索始终可用。
  *
  * 这样无论用户切换模型 API 为 DeepSeek 官方还是 apikey.fun 代理，
  * 桥接服务自动识别 DEEPSEEK_API_KEY 的类型并选择对应搜索通道，对 harness 透明。
  *
  * 依赖前置：
  *   - 已全局安装 @tencent-ai/codebuddy-code 且完成 CLI 登录（codebuddy -p "hi" 可用）
+ *   - Bing 兜底依赖系统 PATH 中的 curl（Windows 10+ 自带 curl.exe）
  *   - Exa 兜底需 User 级环境变量 EXA_API_KEY
  *   - 官方通道的 DEEPSEEK_API_KEY 读取自 User 环境变量或 ~/.dsh/.credentials.yaml
  *
@@ -87,12 +90,27 @@ function cbcSearch(query, numResults = 5, timeoutMs = 120000) {
   });
 }
 
+// 修复 CodeBuddy 偶发的 JSON 格式瑕疵（例如 ""snippet": 多一个引号 / 尾逗号）
+function repairJson(text) {
+  let s = text;
+  // 多余引号：""snippet": → "snippet":
+  s = s.replace(/""([A-Za-z_][A-Za-z0-9_]*)":/g, '"$1":');
+  // 尾逗号：",]" / ",}" → "]" / "}"
+  s = s.replace(/,\s*([}\]])/g, '$1');
+  return s;
+}
+
 // 从 CLI 输出中提取 JSON 数组
 function extractResults(stdout) {
   // 尝试整体解析
   const trimmed = stdout.trim();
   try {
     const arr = JSON.parse(trimmed);
+    if (Array.isArray(arr)) return arr;
+  } catch { /* 继续 */ }
+  // 整体解析失败时，先修复常见格式瑕疵再试一次
+  try {
+    const arr = JSON.parse(repairJson(trimmed));
     if (Array.isArray(arr)) return arr;
   } catch { /* 继续 */ }
   // 尝试从 ```json ... ``` 块提取
@@ -102,13 +120,22 @@ function extractResults(stdout) {
       const arr = JSON.parse(fenceMatch[1].trim());
       if (Array.isArray(arr)) return arr;
     } catch { /* 继续 */ }
+    try {
+      const arr = JSON.parse(repairJson(fenceMatch[1].trim()));
+      if (Array.isArray(arr)) return arr;
+    } catch { /* 继续 */ }
   }
   // 尝试找到第一个 [ ... ] 块
   const firstBracket = trimmed.indexOf('[');
   const lastBracket = trimmed.lastIndexOf(']');
   if (firstBracket >= 0 && lastBracket > firstBracket) {
+    const sliced = trimmed.slice(firstBracket, lastBracket + 1);
     try {
-      const arr = JSON.parse(trimmed.slice(firstBracket, lastBracket + 1));
+      const arr = JSON.parse(sliced);
+      if (Array.isArray(arr)) return arr;
+    } catch { /* 继续 */ }
+    try {
+      const arr = JSON.parse(repairJson(sliced));
       if (Array.isArray(arr)) return arr;
     } catch { /* 继续 */ }
   }
@@ -189,6 +216,87 @@ async function exaFallbackSearch(query, numResults, timeoutMs = 30000) {
     clearTimeout(timer);
   }
 }
+
+// ── Bing 兜底：CodeBuddy 失败时用 Shell curl 抓 Bing HTML 解析结果 ──
+const BING_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
+
+/** 把 Bing HTML 片段里的标签与 HTML 实体清理成纯文本 */
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#x27;/gi, "'")
+    .replace(/&#(\d+);/g, (_, n) => {
+      try { return String.fromCodePoint(Number(n)); } catch { return ''; }
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => {
+      try { return String.fromCodePoint(parseInt(h, 16)); } catch { return ''; }
+    })
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** 从 Bing 搜索 HTML 中解析 b_algo 自然结果块 */
+function parseBingResults(html, limit) {
+  const results = [];
+  const blocks = html.split(/<li class="b_algo"/i).slice(1);
+  for (const block of blocks) {
+    const end = block.indexOf('</li>');
+    const chunk = end >= 0 ? block.slice(0, end) : block;
+    const hrefMatch = chunk.match(/<a[^>]+href="([^"]+)"[^>]*>/i);
+    if (!hrefMatch) continue;
+    const url = hrefMatch[1].trim();
+    if (!url || /^javascript:/i.test(url)) continue;
+    const titleMatch = chunk.match(/<h2[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i);
+    const title = titleMatch ? decodeHtmlEntities(titleMatch[1]) : '';
+    const pMatch = chunk.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+    const snippet = pMatch ? decodeHtmlEntities(pMatch[1]) : '';
+    if (!title || !snippet) continue;
+    results.push({ url, title, snippet, publishedDate: '' });
+    if (results.length >= limit) break;
+  }
+  return results;
+}
+
+/** 用 Shell curl 抓取 Bing 搜索结果页 */
+function bingSearch(query, numResults = 5, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${Math.min(numResults, 10)}`;
+    const args = ['-s', '-L', '--max-time', String(Math.floor(timeoutMs / 1000)), '-A', BING_UA, url];
+    const child = spawn('curl', args, { windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`Bing search timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout.on('data', (d) => { stdout += d.toString('utf8'); });
+    child.stderr.on('data', (d) => { stderr += d.toString('utf8'); });
+    child.on('error', (err) => { clearTimeout(timer); reject(new Error(`curl spawn failed: ${err.message}`)); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error(`curl exited with code ${code}: ${stderr.slice(0, 300)}`));
+      if (!stdout.trim()) return reject(new Error('curl returned empty HTML'));
+      resolve(stdout);
+    });
+  });
+}
+
+/** Bing 兜底入口：抓 HTML → 解析 b_algo → 转 Exa 格式；无结果视为失败（交给 Exa） */
+async function bingFallbackSearch(query, numResults, timeoutMs = 20000) {
+  const html = await bingSearch(query, numResults, timeoutMs);
+  const items = parseBingResults(html, numResults);
+  if (items.length === 0) {
+    throw new Error('Bing returned no parseable b_algo results');
+  }
+  return toExaResponse(items);
+}
+
 
 // ── DeepSeek 官方通道：探测 DEEPSEEK_API_KEY 类型并调用官方原生搜索 ──
 const DEEPSEEK_OFFICIAL_BASE_URL = 'https://api.deepseek.com/anthropic/v1';
@@ -357,8 +465,11 @@ const server = http.createServer(async (req, res) => {
     }
     const numResults = Math.min(Number(parsed.numResults ?? 5) || 5, 10);
     const forceFallback = req.headers['x-force-fallback'] === '1';
+    const forceBing = req.headers['x-force-bing'] === '1';
+    const forceCbcFail = req.headers['x-force-codebuddy-fail'] === '1';
+    const forceBingFail = req.headers['x-force-bing-fail'] === '1';
 
-    console.log(`[bridge] search: "${query}" (numResults=${numResults}${forceFallback ? ', forced-fallback' : ''})`);
+    console.log(`[bridge] search: "${query}" (numResults=${numResults}${forceFallback ? ', forced-exa' : ''}${forceBing ? ', forced-bing' : ''}${forceCbcFail ? ', forced-cbc-fail' : ''}${forceBingFail ? ', forced-bing-fail' : ''})`);
 
     if (forceFallback) {
       // 测试钩子：跳过 CodeBuddy，直接走 Exa 兜底
@@ -375,7 +486,22 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // 智能路由：官方 DeepSeek key → 官方通道；否则 CodeBuddy；失败 Exa 兜底
+    if (forceBing) {
+      // 测试钩子：跳过 CodeBuddy，直接走 Bing 兜底
+      try {
+        const bing = await bingFallbackSearch(query, numResults);
+        console.log(`[bridge] ${bing.results.length} results via Bing (forced fallback)`);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(bing));
+      } catch (bingErr) {
+        console.error(`[bridge] Bing forced fallback failed: ${bingErr.message}`);
+        res.writeHead(502, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: `Bing forced fallback: ${bingErr.message}` }));
+      }
+      return;
+    }
+
+    // 智能路由：官方 DeepSeek key → 官方通道；否则 CodeBuddy；失败 Bing → Exa 兜底
     try {
       const dsKey = resolveDeepSeekKey();
       const isOfficial = dsKey ? await probeDeepSeekOfficial(dsKey) : false;
@@ -392,13 +518,19 @@ const server = http.createServer(async (req, res) => {
 
     // 非官方 key → CodeBuddy 通道
     try {
+      if (forceCbcFail) {
+        throw new Error('Forced CodeBuddy failure (test hook)');
+      }
       const { code, stdout, stderr } = await cbcSearch(query, numResults);
       if (code !== 0) {
         throw new Error(`CodeBuddy CLI exited with code ${code}: ${stderr.slice(0, 300)}`);
       }
       const items = extractResults(stdout);
       if (!items) {
-        throw new Error('Could not parse CodeBuddy search output');
+        // 解析失败时把 stderr/stdout 的真实原因带出来（如 CodeBuddy 后端 TLS 502），
+        // 避免日志只显示 "Could not parse..." 掩盖网络/认证问题。
+        const detail = (stderr || stdout).trim();
+        throw new Error(`Could not parse CodeBuddy search output${detail ? `: ${detail.slice(0, 300)}` : ''}`);
       }
       const exa = toExaResponse(items);
       console.log(`[bridge] ${exa.results.length} results via CodeBuddy`);
@@ -406,8 +538,22 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify(exa));
       return;
     } catch (cbcErr) {
-      // CodeBuddy 失败 → 降级 Exa 兜底
-      console.error(`[bridge] CodeBuddy failed (${cbcErr.message}), falling back to Exa`);
+      // CodeBuddy 失败 → 优先 Bing(Shell curl) 兜底 → 最后 Exa 兜底
+      console.error(`[bridge] CodeBuddy failed (${cbcErr.message}), trying Bing fallback`);
+      let bingErr;
+      try {
+        if (forceBingFail) {
+          throw new Error('Forced Bing failure (test hook)');
+        }
+        const bing = await bingFallbackSearch(query, numResults);
+        console.log(`[bridge] ${bing.results.length} results via Bing (fallback)`);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(bing));
+        return;
+      } catch (err) {
+        bingErr = err;
+        console.error(`[bridge] Bing fallback failed (${err.message}), falling back to Exa`);
+      }
       try {
         const exa = await exaFallbackSearch(query, numResults);
         console.log(`[bridge] ${exa.results.length} results via Exa (fallback)`);
@@ -417,7 +563,7 @@ const server = http.createServer(async (req, res) => {
         console.error(`[bridge] Exa fallback also failed: ${exaErr.message}`);
         res.writeHead(502, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
-          error: `DeepSeek official / CodeBuddy: ${cbcErr.message} | Exa fallback: ${exaErr.message}`,
+          error: `DeepSeek official / CodeBuddy: ${cbcErr.message} | Bing: ${bingErr?.message ?? ''} | Exa fallback: ${exaErr.message}`,
         }));
       }
     }

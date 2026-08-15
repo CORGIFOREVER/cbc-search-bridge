@@ -22,7 +22,8 @@ harness (searchProvider: exa) → cbc-search-bridge (:3200) → 搜索通道
 
 1. **DeepSeek 官方通道** — 若 `DEEPSEEK_API_KEY` 是官方 key（探测 `api.deepseek.com/anthropic/v1` 通过），直接调用 DeepSeek 官方原生搜索（`web_search_20250305` 工具），零额外依赖。
 2. **CodeBuddy 通道** — 否则通过 CodeBuddy CLI（非交互 `-p` 模式）调用 web_search 工具，解析 JSON 结果。
-3. **Exa 兜底** — 前两者均不可用时，直接调用 Exa API（需 `EXA_API_KEY`），保证搜索始终可用。
+3. **Bing 兜底** — CodeBuddy 失败时，用 Shell curl 抓 `https://www.bing.com/search` 并解析 `b_algo` 结果，转 Exa 格式返回（依赖系统 `curl`，Windows 10+ 自带）。
+4. **Exa 兜底** — Bing 也失败时，最后调用 Exa API（需 `EXA_API_KEY`），保证搜索始终可用。
 
 每次探测结果缓存 10 分钟，不会反复探测。
 
@@ -30,7 +31,7 @@ harness (searchProvider: exa) → cbc-search-bridge (:3200) → 搜索通道
 
 ```
 cbc-search-bridge/
-├── server.mjs            # 核心：桥接服务（Node 原生 http，无框架依赖，约 430 行）
+├── server.mjs            # 核心：桥接服务（Node 原生 http，无框架依赖，约 540 行）
 ├── ensure-codebuddy.ps1  # 确保 CodeBuddy CLI daemon 运行（start-harness 的前置步骤）
 ├── start-bridge.ps1      # 单独启动桥接服务
 ├── stop-bridge.ps1       # 停止桥接服务
@@ -47,7 +48,7 @@ cbc-search-bridge/
 
 | 文件 | 职责 |
 |------|------|
-| `server.mjs` | 桥接服务主体。监听 127.0.0.1:3200，模拟 Exa `POST /search` 端点；内部实现三条搜索通道（DeepSeek 官方 / CodeBuddy CLI / Exa）及智能路由、key 类型探测（10 分钟缓存） |
+| `server.mjs` | 桥接服务主体。监听 127.0.0.1:3200，模拟 Exa `POST /search` 端点；内部实现四条搜索通道（DeepSeek 官方 / CodeBuddy CLI / Bing curl / Exa）及智能路由、key 类型探测（10 分钟缓存） |
 | `ensure-codebuddy.ps1` | **保证 CodeBuddy CLI 处于服务状态**。检查 `codebuddy daemon status`，未运行则 `daemon start` 拉起，再做一次 `-p "hi"` 轻量探活。作为 `start-harness.ps1` 的第 0 步自动调用 |
 | `start-bridge.ps1` | 只启动桥接服务（供单独调试 / 已有 harness 不想重启时使用） |
 | `stop-bridge.ps1` | 停掉 3200 端口的桥接服务 |
@@ -102,7 +103,7 @@ Step 2: 启动 dsh web harness  →  监听 127.0.0.1:3080
 
 1. **定位 CLI** — 在 PATH 中查找 `codebuddy`，并解析出真实的 `node.exe` + `bin/codebuddy` 入口（绕开 Windows 下 `.ps1/.cmd` 包装器的问题）
 2. **保活 daemon** — 执行 `codebuddy daemon status` 检查守护进程；若未运行则 `codebuddy daemon start` 拉起，最多重试 3 次
-3. **轻量探活** — 执行 `codebuddy -p "hi"` 验证 CLI 可用；失败仅警告不中断（因为还有 Exa 兜底）
+3. **轻量探活** — 执行 `codebuddy -p "hi"` 验证 CLI 可用；失败仅警告不中断（因为还有 Bing/Exa 兜底）
 
 你可以单独运行它来验证：
 
@@ -126,8 +127,66 @@ codebuddy daemon status
 ### 前置要求
 
 - Node.js 18+
-- 已安装 CodeBuddy CLI（`npm install -g @tencent-ai/codebuddy-code`）且完成登录，或配置 `EXA_API_KEY` 作为兜底
+- 已安装 CodeBuddy CLI（`npm install -g @tencent-ai/codebuddy-code`）且完成登录
+- 系统 PATH 中有 `curl`（Windows 10+ 自带 `C:WindowsSystem32curl.exe`），用于 Bing 兜底；或配置 `EXA_API_KEY` 作为最后兜底
 - （可选）DeepSeek 官方 key：环境变量 `DEEPSEEK_API_KEY` 或 `~/.dsh/.credentials.yaml`
+
+### 没有安装 CodeBuddy CLI 怎么办
+
+**完全没问题，桥接会自动跳过 CodeBuddy，改用 Bing/Exa 兜底。**
+
+`cbc-search-bridge` 的路由顺序是：
+
+```
+DeepSeek 官方 → CodeBuddy CLI → Bing (Shell curl) → Exa
+```
+
+如果电脑上**从没安装过 CodeBuddy CLI**（或没登录、后端连不上），桥接不会卡死，而是：
+
+1. `cbcSearch()` 尝试 spawn `codebuddy`，立即得到 `ENOENT`/spawn 失败；
+2. 捕获后自动进入 **Bing 兜底**：用系统 `curl` 抓 `https://www.bing.com/search` 并解析 `b_algo`；
+3. Bing 也失败时才进入 **Exa 兜底**（需要 `EXA_API_KEY`）。
+
+所以最小可用配置是：
+
+- 有 `curl`（Windows 10+ 自带，Git Bash 也带）→ 不需要 CodeBuddy，也不需要 Exa key；
+- 想更稳 → 再配一个 `EXA_API_KEY`；
+- 想用 CodeBuddy 通道 → 再装 CLI 并登录。
+
+各场景对照：
+
+| 本机情况 | 搜索是否可用 | 实际通道 |
+|---|---|---|
+| 只有 curl | ✅ | Bing |
+| curl + EXA_API_KEY | ✅ | Bing → Exa |
+| 装了 CodeBuddy 且已登录 | ✅ | CodeBuddy → Bing → Exa |
+| 什么都没装 | ❌ | 全部失败 |
+
+**如果想启用 CodeBuddy 通道**（可选）：
+
+```powershell
+# 1. 全局安装 CodeBuddy CLI
+npm install -g @tencent-ai/codebuddy-code
+
+# 2. 完成登录（按提示操作）
+codebuddy
+
+# 3. 验证
+codebuddy -p "hi"
+# 应输出正常回复而不是 502/ENOENT
+
+# 4. 启动链会自动保活 daemon
+.start-harness.ps1
+```
+
+> 注意：`ensure-codebuddy.ps1` 在 CLI 缺失/未登录时**只警告不中断**，因为还有 Bing/Exa 兜底，所以不会因为没装 CodeBuddy 而启动失败。
+
+**更进一步的“工具层铁打兜底”**（可选，DSH 插件）：
+
+即使 `cbc-search-bridge` 进程本身挂了，`web_search` 工具也不会失败——配套的
+`@dsh-external/dsh-web-search-resilient` 插件会在 DSH 进程内：先探测 `:3200/health`，
+桥接活着就走桥接；桥接挂了就直接用 Shell curl 抓 Bing，Bing 也失败再直连 Exa。
+这样兜底不再依赖模型按 AGENTS.md 手动 curl。
 
 ### 启动
 
@@ -190,7 +249,7 @@ curl -X POST http://127.0.0.1:3200/search \
 }
 ```
 
-测试钩子：请求头 `x-force-fallback: 1` 可强制走 Exa 兜底通道，用于验证降级链路。
+测试钩子：`x-force-fallback: 1` 强制走 Exa 兜底；`x-force-bing: 1` 强制走 Bing 兜底；`x-force-codebuddy-fail: 1` 强制 CodeBuddy 失败（验证自动落到 Bing）；`x-force-bing-fail: 1` 强制 Bing 失败（验证自动落到 Exa）。
 
 ## 环境变量
 
